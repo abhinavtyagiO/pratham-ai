@@ -1,3 +1,5 @@
+"""Authenticated Exotel ingress, finite handshake validation, and process-local admission."""
+
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -12,7 +14,16 @@ router = APIRouter()
 
 
 class SessionRegistry:
+    """Limit active handshakes/sessions and reject duplicate call SIDs within one process. Own
+    an async lock, connection counter, and claimed-call set. The router releases
+    reservations and claims in finally; multi-process admission and reconnection are outside
+    this pilot.
+    """
+
     def __init__(self, limit):
+        """Initialize the process-local connection limit, lock, counter, and active call
+        identities. No cross-process or persistent lock is implied.
+        """
         self.limit = limit
         self.lock = asyncio.Lock()
         self.connections = 0
@@ -20,6 +31,10 @@ class SessionRegistry:
 
     @asynccontextmanager
     async def reserve(self):
+        """Reserve capacity before WebSocket acceptance and release it on every exit, including
+        cancellation. Lock only counter updates; raise CAPACITY_REACHED without waiting when
+        the configured limit is full.
+        """
         async with self.lock:
             if self.connections >= self.limit:
                 raise ProtocolError("CAPACITY_REACHED")
@@ -31,6 +46,10 @@ class SessionRegistry:
                 self.connections -= 1
 
     async def claim(self, call_sid):
+        """Atomically claim a provider call SID after start validation, raising DUPLICATE_CALL
+        if active. The router owns release in finally, independently of the connection
+        reservation.
+        """
         async with self.lock:
             if call_sid in self.calls:
                 raise ProtocolError("DUPLICATE_CALL")
@@ -39,6 +58,12 @@ class SessionRegistry:
 
 @router.websocket("/voice/exotel")
 async def exotel(socket: WebSocket):
+    """Authenticate and own one Exotel WebSocket from pre-upgrade validation to cleanup.
+    Require enabled ingress and Basic auth, reserve capacity, parse a bounded
+    connected/start handshake, and verify account/destination before creating per-call
+    providers. Delegate runtime to RealtimeSession; close protocol/timeouts/disconnects
+    safely and always release claims. No customer metadata grants authorization.
+    """
     state = socket.app.state
     settings = state.voice_settings
     if not settings.enabled or not valid_exotel_auth(

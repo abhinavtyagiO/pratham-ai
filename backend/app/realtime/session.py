@@ -1,3 +1,5 @@
+"""Per-call asynchronous orchestration and lifecycle ownership for the live voice path."""
+
 import asyncio
 import hashlib
 from collections import deque
@@ -25,7 +27,23 @@ SILENCE_PROMPT = "क्या आप मुझे सुन पा रहे �
 
 
 class RealtimeSession:
+    """Coordinate one authenticated Exotel call through policy-controlled speech turns.
+
+    The router supplies an initialized protocol, fresh per-call providers, a session
+    factory, and shared telemetry. This object owns its Pipecat worker, PCM resamplers, VAD,
+    bounded playback, response task, and short-transaction VoiceStore. All mutable turn,
+    generation, partial, delivery, and deadline state belongs to this call. Concurrent
+    receive, recognition, playback, and watchdog tasks share one event loop; database work
+    uses independent thread-local sessions. run() owns startup and cleanup, including
+    cancellation propagation and conservative final outcomes.
+    """
+
     def __init__(self, socket, protocol, settings, providers, sessions, telemetry):
+        """Allocate per-call state without connecting providers or writing records. The
+        protocol must already contain validated StartInfo. Input is normalized to 16 kHz
+        mono PCM; generation 0 is reserved for the greeting. Resources become active only
+        when run() starts.
+        """
         self.socket, self.protocol, self.settings = socket, protocol, settings
         self.providers, self.telemetry = providers, telemetry
         self.call_id = str(uuid4())
@@ -54,18 +72,34 @@ class RealtimeSession:
         self.sent_at = {}
 
     def log(self, name, **safe):
+        """Emit a correlated structured event using the call's root trace. Keyword fields must
+        be safe identifiers, enums, lengths, hashes, or measurements; this helper does not
+        redact arbitrary text supplied by a caller.
+        """
         event(name, self.call_id, self.trace_id, **safe)
 
     def latency(self, name, since, **safe):
+        """Record elapsed milliseconds since a monotonic timestamp in both events and the
+        voice-stage histogram. Additional safe fields identify the turn or generation
+        without exposing speech.
+        """
         elapsed = round((monotonic() - since) * 1000, 3)
         self.log(name, latency_ms=elapsed, **safe)
         self.telemetry.histograms["voice_stage_latency_ms"].record(elapsed, {"stage": name})
 
     def first_sent(self, generation):
+        """Record when Playback first writes a generation's PCM packet to Exotel. This callback
+        measures socket-send latency from response start, not carrier playback or caller
+        comprehension.
+        """
         self.sent_at[generation] = monotonic()
         self.latency("first_audio_sent", self.response_started, generation=generation)
 
     def fail(self, failure):
+        """Latch the first VoiceFailure, mark owner attention, and wake run() for shutdown.
+        Later failures cannot replace the originating category; task cancellation and
+        persistence are handled by run().
+        """
         if self.failure is None:
             self.failure = failure
             self.attention = failure.category
@@ -73,6 +107,10 @@ class RealtimeSession:
             self.stopping.set()
 
     async def checked(self, stage, coroutine, category):
+        """Await one provider operation under the configured stall deadline and return its
+        value. Preserve VoiceFailure codes, translate other errors to category/stage/type
+        only, and propagate CancelledError so barge-in can stop the operation.
+        """
         try:
             async with asyncio.timeout(self.settings.provider_timeout_s):
                 return await coroutine
@@ -84,15 +122,29 @@ class RealtimeSession:
             raise VoiceFailure(category, stage, type(exc).__name__) from None
 
     async def submit(self, frame):
+        """Submit an acknowledged Pipecat frame with the provider deadline. Waiting for
+        completion bounds in-flight work and propagates processor errors to the submitting
+        session task.
+        """
         await self.pipeline.submit(frame, self.settings.provider_timeout_s)
 
     def future(self):
+        """Allocate a frame-completion future on the current event loop. The frame processor
+        resolves it; timeout/cancellation can cancel it before queued work executes.
+        """
         return asyncio.get_running_loop().create_future()
 
     async def audio(self, pcm):
+        """Consume one 20 ms, 16 kHz PCM16 frame from Pipecat. Server-VAD mode forwards every
+        frame, including silence. Energy mode maintains 300 ms pre-roll, emits manual speech
+        boundaries, and sends speech through STT; provider errors propagate to the pipeline
+        submitter.
+        """
         if self.stopping.is_set():
             return
         if self.settings.vad_mode == "sarvam":
+            # The server must hear pauses and background silence to own endpointing.
+            # Running local VAD here as well would truncate words or split turns twice.
             await self.checked("stt_audio", self.providers.stt.audio(pcm), "STT_ERROR")
             return
         self.preroll.append(pcm)
@@ -110,7 +162,15 @@ class RealtimeSession:
             await self.checked("stt_boundary", self.providers.stt.boundary(boundary), "STT_ERROR")
 
     async def interrupt(self, reason):
+        """Invalidate obsolete generation, cancel/join the response task, and flush playback
+        when necessary. The monotonically increasing generation rejects late packets and
+        cleared marks. Generated but unacknowledged replies become INTERRUPTED; ACKs
+        received during lock waits retain PLAYED. Cancellation diagnostics finish their
+        ordered database write before replacement speech proceeds.
+        """
         tick = monotonic()
+        # Invalidation happens before any await: late provider/pipeline output loses
+        # its right to play even while cancellation waits for diagnostic persistence.
         self.generation += 1
         active = self.response_task
         was_generating = bool(active and not active.done())
@@ -124,14 +184,24 @@ class RealtimeSession:
             await self.playback.clear(self.generation)
             self.latency("audio_cleared", tick, reason=reason, generation=self.generation)
             for gen, (message_id, _) in unplayed:
-                await self.store.delivery(message_id, "INTERRUPTED")
+                # A valid ACK may have arrived while clear waited for the send lock.
+                # Delivery is decided at ACK receipt, not at its later database commit.
+                if self.attempts[gen][1] != "GENERATED":
+                    continue
                 self.attempts[gen] = (message_id, "INTERRUPTED")
+                await self.store.delivery(message_id, "INTERRUPTED")
         else:
             self.playback.generation = self.generation
         if interrupted:
             self.latency("barge_in_cancelled", tick, generation=self.generation)
 
     async def speech(self, speech):
+        """Apply one normalized STT/VAD event to this conversation. Speech start cancels
+        obsolete output, speech end starts the final-transcript deadline, and partials
+        update bounded recovery state without invoking the model. A nonempty, nonduplicate
+        final persists a customer turn and spawns respond(); transcript/turn limits fail
+        closed.
+        """
         now = monotonic()
         if self.stopping.is_set():
             return
@@ -181,6 +251,14 @@ class RealtimeSession:
             )
 
     async def respond(self, turn, generation, utterance=None, fixed_text=None):
+        """Generate and queue one policy-authorized response, or speak a reviewed fixed
+        greeting/prompt. For normal turns, reload business/rules, detect intent, persist
+        policy, allowlist ModelContext, validate the whole model draft, and render approved
+        wording before TTS. Model failure uses a deterministic authorized fallback and owner
+        attention. PCM is validated, resampled, packetized, and tagged with
+        generation/message IDs. Cancellation propagates; other failures latch session
+        shutdown, and diagnostic writes preserve cancelled invocations.
+        """
         self.response_started = monotonic()
         stage = "load_business_context"
         version = getattr(self.providers.model, "prompt_version", RESPONSE_VERSION)
@@ -355,6 +433,10 @@ class RealtimeSession:
             )
 
     async def read_speech(self):
+        """Own the STT event reader and route each normalized event through Pipecat with
+        acknowledgement. Unexpected stream completion or provider errors latch STT failure;
+        cancellation is propagated for orderly session cleanup.
+        """
         try:
             async for speech in self.providers.stt.events():
                 await self.submit(RecognizedSpeech(speech, self.future()))
@@ -370,6 +452,11 @@ class RealtimeSession:
             )
 
     async def receive(self):
+        """Own Exotel ingress after the validated start event. Parse/validate each event;
+        resample media to acknowledged Pipecat frames, persist playback ACKs, and stop on
+        hangup. ACK state is published before database awaits to prevent interruption races.
+        Disconnects retain attention; protocol and receive errors latch telephony failure.
+        """
         try:
             while not self.stopping.is_set():
                 message = self.protocol.parse(await self.socket.receive_text())
@@ -384,10 +471,12 @@ class RealtimeSession:
                 elif message["event"] == "mark":
                     message_id = self.playback.acknowledge(message["mark"]["name"])
                     if message_id:
-                        await self.store.delivery(message_id, "PLAYED")
+                        # Publish the ACK before yielding to persistence: otherwise a
+                        # concurrent speech_start can misclassify confirmed speech.
                         for gen, (mid, _) in self.attempts.items():
                             if mid == message_id:
                                 self.attempts[gen] = (mid, "PLAYED")
+                        await self.store.delivery(message_id, "PLAYED")
                         self.last_activity = monotonic()
                         self.log("playback_acknowledged")
                 elif message["event"] == "dtmf":
@@ -409,6 +498,11 @@ class RealtimeSession:
             )
 
     async def watchdog(self):
+        """Check independent media, call, utterance, final-transcript, playback, and silence
+        deadlines. When truly idle, queue one reviewed recovery prompt and later end with
+        attention. Provider processing and pending playback suppress idle prompts; run()
+        cancels this loop during cleanup.
+        """
         while not self.stopping.is_set():
             await asyncio.sleep(0.02)
             now = monotonic()
@@ -447,6 +541,13 @@ class RealtimeSession:
                     )
 
     async def run(self):
+        """Start the durable call, Pipecat, STT, concurrent loops, and greeting, then await
+        termination. Own and join all spawned tasks and close providers/pipeline/socket on
+        every path. Persist partials, sanitized failure diagnostics, delivery states, and
+        aggregate outcome when call creation succeeded. Server cancellation is re-raised
+        after cleanup; storage failure is logged by type because persistence cannot be
+        guaranteed then. Return the application call ID.
+        """
         tasks = []
         started = False
         with self.telemetry.stage("incoming_call", self.call_id) as root:

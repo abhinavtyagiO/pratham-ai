@@ -1,3 +1,5 @@
+"""Explicit live/mock voice settings, VAD tuning, and bounded resource deadlines."""
+
 from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
@@ -5,6 +7,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class VoiceSettings(BaseSettings):
+    """Validated deployment configuration for real-time voice ingress and per-call limits. Read
+    VOICE_ environment variables, then the current directory's .env, then defaults; secrets
+    remain SecretStr. Factories select live versus mock providers explicitly. Runtime
+    objects retain these settings but keep call state separately; disabled mock mode is the
+    default.
+    """
+
     model_config = SettingsConfigDict(env_prefix="VOICE_", env_file=".env", extra="ignore")
     enabled: bool = False
     mode: Literal["mock", "live"] = "mock"
@@ -41,6 +50,10 @@ class VoiceSettings(BaseSettings):
 
     @model_validator(mode="after")
     def valid_silence(self):
+        """Reject configurations whose close deadline does not follow the recovery prompt.
+        Return validated settings for Pydantic; this invariant prevents a prompt from being
+        scheduled after call termination.
+        """
         if self.silence_close_s <= self.silence_prompt_s:
             raise ValueError("silence_close_s must exceed silence_prompt_s")
         return self

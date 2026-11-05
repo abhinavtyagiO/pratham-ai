@@ -1,3 +1,5 @@
+"""Legacy single-turn simulation/replay path sharing policy guarantees with real-time voice."""
+
 import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -32,6 +34,11 @@ from app.services.errors import BusinessNotFound, CallExecutionError, ErrorCateg
 
 @dataclass(frozen=True)
 class SimulationResult:
+    """Immutable API/CLI result of a completed deterministic single-turn simulation. Contains
+    correlation IDs and rendered authorized response plus classified intent/action/outcome;
+    playable audio and live delivery state are outside this legacy result.
+    """
+
     call_id: str
     trace_id: str
     intent: Intent
@@ -41,7 +48,17 @@ class SimulationResult:
 
 
 class ConversationOrchestrator:
+    """Run the synchronous Slice 1 vertical slice with policy enforcement and durable stage
+    evidence. Own a repository/Session, provider bundle, telemetry, and per-run
+    stage/correlation state. It is not concurrency-safe and is instantiated per
+    request/evaluation case; live calls use RealtimeSession instead.
+    """
+
     def __init__(self, repository: CallRepository, providers: Providers, telemetry: Telemetry):
+        """Bind caller-owned repository/providers/telemetry and create the pure PolicyEngine.
+        Do not share the instance across simultaneous runs because run() updates
+        correlation/failure-stage state.
+        """
         self.repo = repository
         self.providers = providers
         self.telemetry = telemetry
@@ -49,6 +66,10 @@ class ConversationOrchestrator:
 
     @contextmanager
     def _phase(self, name, category, provider=None, metric=None, events=None):
+        """Track the active failure stage/category/provider while tracing a synchronous
+        operation. Optionally record paired safe events and histogram timing; exceptions
+        propagate with stage state retained for run() recovery.
+        """
         self.stage, self.category, self.provider = name, category, provider
         with self.telemetry.stage(name, self.call_id, metric):
             start = perf_counter()
@@ -63,14 +84,25 @@ class ConversationOrchestrator:
                 )
 
     def _log(self, name, **fields):
+        """Emit a structured event correlated to the current run. Supplied fields must be safe
+        metadata; transcript and provider error strings belong outside operational logging.
+        """
         event(name, self.call_id, self.trace_id, **fields)
 
     def _message(self, speaker, text):
+        """Commit one ordered transcript message within a database-classified phase. Log
+        speaker and text length only; a persistence failure is handled by run() with
+        previously committed stages intact.
+        """
         with self._phase("persist_conversation", ErrorCategory.DATABASE_ERROR):
             self.repo.message(self.call_id, speaker, text)
             self._log("message_persisted", speaker=speaker, text_length=len(text))
 
     def _speak(self, text):
+        """Invoke legacy synthesis for backend-rendered text, requiring nonempty bytes and
+        recording latency. The mock returns UTF-8 simulation transport; this method does not
+        play PCM or confirm carrier delivery.
+        """
         with self._phase(
             "text_to_speech",
             ErrorCategory.TTS_ERROR,
@@ -83,6 +115,11 @@ class ConversationOrchestrator:
                 raise ValueError("Invalid synthesized audio")
 
     def _invoke_model(self, context, *, summary=False):
+        """Invoke response or summary generation with its allowlisted context/version and
+        validate the returned schema. Return the constrained value; in finally persist
+        identifier-only inputs, validated output/usage, and error type even when generation
+        fails. No unvalidated model text becomes speech.
+        """
         model = self.providers.model
         version = SUMMARY_VERSION if summary else RESPONSE_VERSION
         output_type = SummaryDraft if summary else ResponseDraft
@@ -150,6 +187,14 @@ class ConversationOrchestrator:
             )
 
     def run(self, business_id, utterance, caller_phone=None, *, replay_of=None, snapshot=None):
+        """Execute one complete simulated caller turn and return SimulationResult. Create
+        durable call/snapshot, classify final text, evaluate/persist policy, construct
+        minimal model context, render approved response/summary, and complete the outcome.
+        Optional snapshot/replay_of restore prior facts for deterministic single-turn
+        replay. Missing business propagates; other failures attempt durable NEEDS_ATTENTION
+        recovery then raise a correlated CallExecutionError. Resources remain owned by the
+        caller.
+        """
         self.call_id = str(uuid4())
         self.business_id = business_id
         self.rule_id = None

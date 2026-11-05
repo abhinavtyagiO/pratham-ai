@@ -1,3 +1,5 @@
+"""Safe structured application events, per-call tracing, and bounded aggregate metrics."""
+
 import json
 import logging
 import sys
@@ -16,7 +18,16 @@ logger = logging.getLogger("business_pa")
 
 
 class JSONFormatter(logging.Formatter):
+    """Render application LogRecords with UTC timestamp, level, and structured safe payload.
+    Call sites own redaction/allowlisting; this formatter is not a general secret scrubber
+    and should not receive raw provider reprs.
+    """
+
     def format(self, record):
+        """Serialize a record's structured payload as Unicode JSON, converting non-JSON scalar
+        types to strings. Arbitrary transcript/error objects must be excluded before this
+        boundary.
+        """
         return json.dumps(
             {
                 "timestamp": datetime.now(UTC).isoformat(),
@@ -29,6 +40,10 @@ class JSONFormatter(logging.Formatter):
 
 
 def configure_logging(level: str = "INFO"):
+    """Install one stderr JSON handler on the application logger, apply the requested level,
+    and disable propagation. Repeated app/test construction avoids duplicate handlers;
+    unrelated provider loggers are not configured here.
+    """
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(JSONFormatter())
@@ -39,6 +54,10 @@ def configure_logging(level: str = "INFO"):
 
 def event(name: str, call_id: str, trace_id: str, **safe_fields):
     # Call sites pass identifiers, bounded enums, counts, and hashes; never raw transcripts.
+    """Emit an application event with call/trace correlation and caller-supplied safe metadata.
+    This function does not inspect/redact arbitrary values; call sites must restrict fields
+    to identifiers, counts, enums, hashes, or timings.
+    """
     logger.info(
         name,
         extra={
@@ -53,7 +72,16 @@ def event(name: str, call_id: str, trace_id: str, **safe_fields):
 
 
 class JSONSpanExporter(SpanExporter):
+    """Export completed OpenTelemetry spans as structured application events. Holds no call-
+    specific buffers; stage instrumentation disables raw exception capture so trace events
+    remain metadata-only.
+    """
+
     def export(self, spans):
+        """Emit each completed span's identifiers, parent, status, timing, and safe attributes,
+        returning SUCCESS. Transcript bodies and provider exception messages must never be
+        span attributes.
+        """
         for span in spans:
             attrs = dict(span.attributes or {})
             event(
@@ -96,7 +124,17 @@ HISTOGRAMS = (
 
 
 class Telemetry:
+    """Own application/test OpenTelemetry tracer/meter providers and named instruments. Default
+    exports safe spans to JSON and reads metrics in memory; an explicit OTLP endpoint adds
+    background exporters/readers. Shared across calls with call IDs on spans, not mutable
+    per-call fields; the creating app/CLI must shutdown it.
+    """
+
     def __init__(self, otlp_endpoint: str | None = None, span_exporter=None):
+        """Create service resources, tracer/meter providers, counters/histograms, and an in-
+        memory metric reader. Accept an injected span exporter for tests; optional OTLP
+        setup owns background exporters until shutdown().
+        """
         resource = Resource.create({"service.name": "ai-business-pa", "service.version": "0.2.0"})
         self.traces = TracerProvider(resource=resource, shutdown_on_exit=False)
         self.traces.add_span_processor(SimpleSpanProcessor(span_exporter or JSONSpanExporter()))
@@ -124,10 +162,18 @@ class Telemetry:
         self.histograms = {name: meter.create_histogram(name, unit="ms") for name in HISTOGRAMS}
 
     def count(self, name, **attrs):
+        """Increment the named counter with bounded metric attributes. Avoid call IDs or
+        transcript text in attributes because high-cardinality/customer data does not belong
+        in aggregate metrics.
+        """
         self.counters[name].add(1, attrs)
 
     @contextmanager
     def stage(self, name, call_id, metric=None):
+        """Trace an operation, optionally recording histogram milliseconds on every exit. Yield
+        the span, mark failures without recording sensitive exception text, and re-raise
+        errors; caller cancellation still runs timing cleanup.
+        """
         start = perf_counter()
         with self.tracer.start_as_current_span(
             name,
@@ -146,9 +192,15 @@ class Telemetry:
                     self.histograms[metric].record((perf_counter() - start) * 1000)
 
     def metrics_snapshot(self):
+        """Read current in-memory metrics as a JSON-compatible dictionary, returning empty data
+        when no measurements exist. Used by the authenticated operator endpoint and tests.
+        """
         data = self.reader.get_metrics_data()
         return json.loads(data.to_json()) if data else {}
 
     def shutdown(self):
+        """Release owned tracer/meter providers and their optional exporter resources. The
+        app/CLI invokes this once after its operations or sessions are finished.
+        """
         self.traces.shutdown()
         self.meters.shutdown()

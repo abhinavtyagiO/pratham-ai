@@ -1,3 +1,5 @@
+"""Production Saaras realtime STT and Bulbul streaming TTS wire adapters."""
+
 import asyncio
 import base64
 import json
@@ -10,16 +12,31 @@ from app.realtime.wav import StreamingWAV
 
 
 class SarvamRealtimeSTT:
+    """One call's Saaras realtime WebSocket adapter, producing normalized SpeechEvents. Own the
+    provider socket, application keepalive task, and send lock; the session owns the receive
+    loop and stall deadlines. Start once and close once per call; no reconnect can silently
+    replay caller audio. Injectable connectors support wire-contract tests without network
+    access.
+    """
+
     name = "sarvam_realtime"
     endpoint = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
 
     def __init__(self, settings, *, connector=connect):
+        """Retain voice settings and connector, and allocate an empty socket/keepalive plus
+        send lock. Credentials remain in SecretStr and are unwrapped only for provider
+        authentication in start().
+        """
         self.settings, self.connector = settings, connector
         self.socket = None
         self.keepalive = None
         self.send_lock = asyncio.Lock()
 
     def url(self):
+        """Build the explicit Saaras v4 realtime query for 16 kHz linear16 and configured
+        Hindi/VAD tuning. Server mode uses endpointing=vad; energy mode uses manual
+        boundaries. No credentials are included in the URL.
+        """
         cfg = self.settings
         return (
             self.endpoint
@@ -41,6 +58,10 @@ class SarvamRealtimeSTT:
         )
 
     async def start(self):
+        """Connect with the subscription-key header and bounded WebSocket buffers, then require
+        session.begin before starting keepalive. The session wraps this operation in a
+        deadline and owns close() even if handshake parsing fails.
+        """
         self.socket = await self.connector(
             self.url(),
             additional_headers={
@@ -58,17 +79,32 @@ class SarvamRealtimeSTT:
         self.keepalive = asyncio.create_task(self.ping())
 
     async def send(self, data):
+        """Serialize one JSON provider event under the send lock shared by audio, boundaries,
+        ping, and end. Errors propagate to the caller's deadline/failure handling; payloads
+        are never logged here.
+        """
         async with self.send_lock:
             await self.socket.send(json.dumps(data))
 
     async def audio(self, pcm16):
+        """Encode internal raw 16 kHz mono PCM16 as the realtime audio_input envelope. Await
+        the serialized socket write; caller cancellation and send errors propagate.
+        """
         await self.send({"event": "audio_input", "audio": base64.b64encode(pcm16).decode("ascii")})
 
     async def boundary(self, kind):
+        """Send manual speech_start/end only in energy mode. Server VAD already owns turn
+        boundaries, so forwarding client boundaries in that mode would conflict with
+        provider endpointing.
+        """
         if self.settings.vad_mode == "energy":
             await self.send({"event": kind})
 
     async def ping(self):
+        """Send application keepalives every ten seconds under a provider deadline. On
+        transport timeout/error close the socket so the receive loop reports failure;
+        close() cancels and joins this task.
+        """
         try:
             while True:
                 await asyncio.sleep(10)
@@ -80,6 +116,11 @@ class SarvamRealtimeSTT:
             await self.socket.close()
 
     async def events(self):
+        """Yield normalized server VAD and partial/final transcript events from the provider
+        socket. Limit text length, retain utterance IDs for deduplication, ignore expected
+        control events, and terminate on session.end. Invalid/error events raise sanitized
+        VoiceFailure without copying provider messages; caller cancellation propagates.
+        """
         async for raw in self.socket:
             try:
                 data = json.loads(raw)
@@ -107,6 +148,10 @@ class SarvamRealtimeSTT:
                 raise VoiceFailure("STT_ERROR", "stt_protocol", "InvalidProviderMessage") from None
 
     async def close(self):
+        """Cancel/join keepalive, attempt a bounded end event, and close the owned WebSocket in
+        finally. The session separately cancels the receive loop and bounds this cleanup;
+        errors may propagate for safe cleanup diagnostics.
+        """
         if self.keepalive:
             self.keepalive.cancel()
             await asyncio.gather(self.keepalive, return_exceptions=True)
@@ -118,13 +163,27 @@ class SarvamRealtimeSTT:
 
 
 class SarvamStreamingTTS:
+    """Stream Bulbul v4 Flash speech as validated 16 kHz mono PCM16. Each utterance owns a
+    fresh socket through its async generator, avoiding cross-generation audio after
+    cancellation. No persistent socket is shared across responses or calls.
+    """
+
     name = "sarvam_bulbul"
     endpoint = "wss://api.sarvam.ai/text-to-speech/ws"
 
     def __init__(self, settings, *, connector=connect):
+        """Retain explicit model/voice/language settings and an injectable WebSocket connector.
+        No network resource is acquired until stream() is iterated.
+        """
         self.settings, self.connector = settings, connector
 
     async def stream(self, text, sample_rate):
+        """Yield bounded raw PCM chunks for already-authorized text at 16 kHz. Open an
+        utterance-owned socket, configure WAV output, send text/flush, and validate/strip
+        the streaming RIFF header. Require final completion and whole PCM samples;
+        protocol/provider errors raise sanitized VoiceFailure. Generator closure or
+        cancellation exits the socket context and discards obsolete audio.
+        """
         if not text.strip() or len(text) > 2500 or sample_rate != 16000:
             raise VoiceFailure("TTS_ERROR", "tts_input")
         cfg = self.settings
@@ -191,4 +250,8 @@ class SarvamStreamingTTS:
 
     async def close(self):
         # Each active utterance is owned by and closed with its async generator.
+        """Satisfy the provider lifecycle interface without closing an unrelated utterance.
+        Active sockets belong to stream() generators, which the session closes before
+        provider cleanup.
+        """
         pass

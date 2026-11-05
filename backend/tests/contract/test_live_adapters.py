@@ -44,52 +44,94 @@ def wav_audio(rate=16000):
 
 
 class FakeSocket:
+    """Deterministic provider-wire peer holding scripted JSON responses, captured writes, and
+    close state. No network connection exists; each connector invocation creates a separate
+    instance.
+    """
+
     def __init__(self, responses):
+        """Encode scripted response envelopes and initialize independent send/close evidence
+        for one fake connection.
+        """
         self.responses = deque(json.dumps(x) for x in responses)
         self.sent = []
         self.closed = False
 
     async def send(self, data):
+        """Capture decoded client JSON to validate the exact provider request contract without
+        logging headers or real credentials.
+        """
         self.sent.append(json.loads(data))
 
     async def recv(self):
+        """Return the next scripted response for handshake validation, raising if the fixture
+        omitted a required event.
+        """
         return self.responses.popleft()
 
     def __aiter__(self):
+        """Expose the peer as the async receive iterator expected by production adapters."""
         return self
 
     async def __anext__(self):
+        """Yield the next scripted response or finish the stream when the script is exhausted."""
         if not self.responses:
             raise StopAsyncIteration
         return self.responses.popleft()
 
     async def close(self):
+        """Record that the production adapter released its owned connection on success, error,
+        or cancellation.
+        """
         self.closed = True
 
 
 class Connection:
+    """Fake websockets connector result supporting both await and async-with acquisition
+    styles. Own a single fake socket and close it when an utterance context exits.
+    """
+
     def __init__(self, socket):
+        """Bind one fake socket to an acquisition wrapper without starting a task."""
         self.socket = socket
 
     def __await__(self):
+        """Return an awaitable that resolves to the fake socket for Saaras's explicit session
+        ownership pattern.
+        """
+
         async def connected():
+            """Complete fake connection acquisition without contacting a provider or altering
+            response order.
+            """
             return self.socket
 
         return connected().__await__()
 
     async def __aenter__(self):
+        """Return the bound peer for Bulbul's utterance-scoped socket context."""
         return self.socket
 
     async def __aexit__(self, *args):
+        """Close the peer even when the synthesizer generator is cancelled or fails validation."""
         await self.socket.close()
 
 
 class Connector:
+    """Factory double capturing provider URL, options, and independent socket per acquisition.
+    Synthetic fixture keys let tests verify header placement without using development
+    secrets.
+    """
+
     def __init__(self, factory):
+        """Retain the fake socket factory and allocate per-test connection history."""
         self.factory = factory
         self.calls = []
 
     def __call__(self, url, **kwargs):
+        """Create one isolated peer and record the production adapter's connection contract,
+        returning an await/context-compatible wrapper.
+        """
         socket = self.factory()
         self.calls.append((url, kwargs, socket))
         return Connection(socket)
@@ -258,7 +300,14 @@ async def test_bulbul_cancellation_closes_the_obsolete_socket():
     entered = asyncio.Event()
 
     class BlockingSocket(FakeSocket):
+        """Provider peer that emits initial audio then stalls, exposing whether cancellation
+        closes the obsolete utterance socket.
+        """
+
         async def __anext__(self):
+            """Return scripted chunks, then signal the blocked state and await cancellation
+            instead of ending synthesis normally.
+            """
             if self.responses:
                 return self.responses.popleft()
             entered.set()
@@ -283,19 +332,35 @@ async def test_actual_adapters_across_multiturn_pipeline_with_mocked_network(
     engine, session, telemetry
 ):
     class SpeechSocket(FakeSocket):
+        """Manual-endpointing Saaras peer for the energy-VAD multi-turn contract test. Own an
+        async queue and turn counter; real production adapters still parse every wire event.
+        """
+
         def __init__(self):
+            """Queue session.begin and initialize independent transcript/turn state for the
+            fake call.
+            """
             super().__init__([])
             self.queue = asyncio.Queue()
             self.queue.put_nowait(json.dumps({"event": "session.begin"}))
             self.turn = 0
 
         async def recv(self):
+            """Wait for the next provider event through the same queue used by the long-running
+            reader.
+            """
             return await self.queue.get()
 
         async def __anext__(self):
+            """Keep the fake provider stream open between turns until the session cancels its
+            reader.
+            """
             return await self.queue.get()
 
         async def send(self, raw):
+            """Capture client events and translate manual speech boundaries into scripted
+            partial/final transcripts with unique utterance IDs.
+            """
             await super().send(raw)
             data = json.loads(raw)
             if data["event"] == "speech_start":

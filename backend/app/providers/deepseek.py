@@ -1,3 +1,5 @@
+"""Capability-limited DeepSeek phrasing selection; SSE content is never spoken directly."""
+
 import json
 
 import httpx
@@ -9,10 +11,20 @@ from app.realtime.contracts import VoiceFailure
 
 
 class DeepSeekFlash:
+    """Select approved response phrasing through DeepSeek Flash with thinking disabled. Own an
+    async HTTP client, including an injected test client, and close it at call cleanup. Only
+    allowlisted ModelContext enters the request; complete schema validation is required
+    before any output can become speech.
+    """
+
     name = "deepseek"
     prompt_version = VOICE_RESPONSE_VERSION
 
     def __init__(self, settings, *, client=None):
+        """Retain the configured model and own the supplied client or create an authenticated
+        bounded-timeout HTTP client. No request is made here; injected clients must expose
+        the same streaming API and are also closed by close().
+        """
         self.model = settings.llm_model
         self.client = client or httpx.AsyncClient(
             base_url="https://api.deepseek.com",
@@ -21,6 +33,12 @@ class DeepSeekFlash:
         )
 
     async def generate(self, context):
+        """Stream a JSON-mode non-thinking completion for authorized context and return
+        ModelResult[ResponseDraft] with optional token usage. Buffer at most 8192 content
+        characters, ignore reasoning deltas, require finish=stop plus DONE, and validate the
+        closed schema. HTTP, parse, schema, and cancellation failures propagate; no partial
+        text or arbitrary model sentence reaches TTS.
+        """
         body = {
             "model": self.model,
             "thinking": {"type": "disabled"},
@@ -65,4 +83,7 @@ class DeepSeekFlash:
         return ModelResult(draft, tokens.get("prompt_tokens"), tokens.get("completion_tokens"))
 
     async def close(self):
+        """Close the owned HTTP client and its pooled connections after the response task has
+        been joined. The session bounds cleanup and reports failures by type only.
+        """
         await self.client.aclose()

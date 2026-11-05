@@ -16,6 +16,30 @@ from app.services.orchestrator import ConversationOrchestrator
 BACKEND = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def isolated_configuration(monkeypatch):
+    """Keep ordinary tests independent of developer credentials and local voice mode.
+
+    Tests inject their own settings or fake transports; only the explicitly invoked
+    live utility may consume the developer's .env. PostgreSQL's test URL is retained.
+    """
+    import os
+
+    from app.config import Settings
+    from app.realtime.config import VoiceSettings
+
+    for cls in (Settings, VoiceSettings):
+        monkeypatch.setitem(cls.model_config, "env_file", None)
+    for name in list(os.environ):
+        if name.startswith("VOICE_") or name in {
+            "API_KEY",
+            "PROVIDER_MODE",
+            "DATABASE_URL",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+        }:
+            monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
     url = f"sqlite:///{tmp_path / 'test.db'}"
@@ -61,7 +85,15 @@ def events():
     records = []
 
     class Capture(logging.Handler):
+        """Collect structured application payloads in tests without changing production
+        formatting. The fixture owns handler installation/removal and logger-level
+        restoration.
+        """
+
         def emit(self, record):
+            """Append only the application's structured payload so tests can assert correlation
+            and absence of sensitive text.
+            """
             records.append(record.payload)
 
     capture = Capture()

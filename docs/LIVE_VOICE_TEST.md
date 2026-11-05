@@ -1,7 +1,9 @@
 # Live voice pilot: setup and acceptance procedure
 
-This is an operator procedure. **No real phone call or paid provider request has been performed
-by the implementation run.** The protocol and lifecycle tests use local mocks. Use a direct
+This is an operator procedure. A single approved live-provider smoke run passed Sarvam STT/TTS
+and DeepSeek on 5 November 2026; see [the verification record](SLICE_2_VERIFICATION_REPORT.md).
+**No real phone call or public deployment has been performed.** Protocol/lifecycle CI tests use
+local mocks. Use a direct
 Exotel number first; conditional forwarding from the owner's existing mobile is a later test.
 
 ## 1. Install and verify locally
@@ -83,6 +85,20 @@ Check configuration without making a network request:
 ../.venv/bin/python -m app.voice_preflight
 ```
 
+For a separately authorized actual provider test using synthetic data:
+
+```sh
+../.venv/bin/python -m app.live_provider_smoke --live
+```
+
+The utility requires the Sarvam/DeepSeek keys, but does not require Exotel or enabled ingress.
+It leaves `.env`/ingress mode unchanged. It creates `reports/live-provider-smoke/report.json`
+and a playable `synthetic-speech.wav`, using production adapters. TTS synthesizes a fixed Hindi
+sentence, DeepSeek returns a validated non-thinking draft, and Saaras server VAD transcribes
+the generated speech at real-time speed. The report marks every check PASSED, FAILED, or BLOCKED
+with safe status/type/timing evidence. A missing TTS sample blocks STT instead of substituting
+a tone or claiming recognition. Normal pytest and CI never execute this command.
+
 This lists missing variable names and model IDs; it does not print keys or verify account
 entitlements. Live startup fails if required provider/ingress settings are missing. A provider
 subscription, balance, model availability, and Saaras realtime enablement must be verified in
@@ -122,7 +138,9 @@ In the Exotel dashboard:
    Exotel turns userinfo into an HTTP Basic Authorization header. Keep this URL private in the
    dashboard. The application never accepts an ingress secret in a query parameter.
 3. Configure 8 kHz PCM streaming for the first test, then map the direct ExoPhone to this flow.
-   16 and 24 kHz Exotel PCM are also accepted and resampled internally. Mulaw/Twilio envelopes
+   16 and 24 kHz Exotel PCM are also accepted and resampled internally. Both documented
+   media-format representations are normalized under strict codec/unit checks; see the
+   [format table](VOICE_DATA_FLOW.md#reconciled-media-formats). Mulaw/Twilio envelopes
    are rejected rather than misinterpreted.
 4. Confirm the destination number format matches `VOICE_EXOTEL_TO_NUMBER`. The account SID in
    the start event must match `VOICE_EXOTEL_ACCOUNT_SID`; these checks follow Basic authentication.

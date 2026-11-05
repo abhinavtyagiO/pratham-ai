@@ -72,12 +72,23 @@ async def test_two_simultaneous_independent_sessions(sessions, telemetry, events
 
 
 class BlockingTTS(ToneTTS):
+    """Tone synthesizer double that stalls the first customer reply after initial PCM. Own call
+    count and synchronization events so tests can deterministically interrupt generation or
+    hang up.
+    """
+
     def __init__(self):
+        """Allocate independent entered/cancelled signals and reset the synthesis invocation
+        counter.
+        """
         self.calls = 0
         self.blocked = asyncio.Event()
         self.cancelled = asyncio.Event()
 
     async def stream(self, text, sample_rate):
+        """Use normal tones for greeting/later replies; block the second invocation until
+        cancelled and always signal cancellation/closure from its finally block.
+        """
         self.calls += 1
         if self.calls == 2:
             yield tone(0.1, sample_rate)
@@ -210,3 +221,35 @@ async def test_playback_timeout_is_persisted_failure(sessions, telemetry):
     detail = await harness.finish()
     assert detail["status"] == "FAILED"
     assert detail["failures"][0]["stage"] == "playback_timeout"
+
+
+async def test_ack_received_before_interrupt_stays_played_during_slow_persistence(
+    sessions, telemetry
+):
+    """Force the ACK/database scheduling window that previously mislabeled played speech."""
+    from app.realtime.contracts import SpeechEvent
+
+    harness = await AudioHarness(sessions, telemetry).begin()
+    await harness.utterance()
+    mark = await harness.next("mark")
+    delivery = harness.session.store.delivery
+    ack_entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_delivery(message_id, status):
+        if status == "PLAYED":
+            ack_entered.set()
+            await release.wait()
+        await delivery(message_id, status)
+
+    harness.session.store.delivery = delayed_delivery
+    try:
+        await harness.feed("mark", mark=mark["mark"])
+        await asyncio.wait_for(ack_entered.wait(), 3)
+        # Recognition is independent of Exotel's receive loop and may barge in
+        # while the ACK transaction is still waiting for the database.
+        await harness.session.speech(SpeechEvent("speech_start"))
+        assert all(state == "PLAYED" for _, state in harness.session.attempts.values())
+    finally:
+        release.set()
+        detail = await harness.finish()
+    assert detail["voice_turns"][0]["status"] == "PLAYED"

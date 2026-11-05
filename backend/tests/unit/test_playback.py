@@ -51,7 +51,14 @@ async def test_socket_send_timeout_and_registry_capacity():
     from app.realtime.protocol import ProtocolError
 
     class StalledSocket:
+        """Socket double whose write never completes, forcing the production playback send
+        deadline to report failure.
+        """
+
         async def send_json(self, message):
+            """Block without consuming a network resource until the caller's timeout cancels
+            this synthetic write.
+            """
             await asyncio.Event().wait()
 
     playback = Playback(

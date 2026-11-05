@@ -1,3 +1,5 @@
+"""Credential-free real-PCM simulation CLI with durable call evidence and audible test tones."""
+
 import argparse
 import asyncio
 import base64
@@ -16,6 +18,10 @@ from app.seed import seed
 
 
 async def scenario(sessions, telemetry):
+    """Run two synthetic energy-VAD price turns through the real PCM session/harness and
+    require RESOLVED plus two durable turns. Return call detail and concatenated outbound
+    PCM; scripted STT/tone TTS prove transport behavior, not human speech recognition.
+    """
     harness = await AudioHarness(sessions, telemetry).begin()
     for _ in range(2):
         await harness.utterance()
@@ -32,6 +38,10 @@ async def scenario(sessions, telemetry):
 
 
 def main():
+    """Migrate/seed an isolated temporary database, run the PCM scenario, and save call.json
+    plus an 8 kHz playable tone WAV. Own/dispose engine and telemetry and label output
+    explicitly as simulated; no provider credentials are required or used by the harness.
+    """
     parser = argparse.ArgumentParser(
         description="Exotel/Pipecat real-PCM simulation; no credentials"
     )

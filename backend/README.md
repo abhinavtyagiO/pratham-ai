@@ -1,10 +1,16 @@
 # Pratham AI backend
 
-Current voice implementation: [Slice 2A checkpoint](../docs/SLICE_2A_REPORT.md) and
+Start with the [engineering guide](../docs/CODEBASE_GUIDE.md),
+[complete voice data flow](../docs/VOICE_DATA_FLOW.md),
+[verification evidence](../docs/SLICE_2_VERIFICATION_REPORT.md), and
 [live voice test instructions](../docs/LIVE_VOICE_TEST.md). `make simulate-audio` runs real PCM
 through Exotel event parsing, Pipecat, scripted STT, policy/model gating, tone TTS, and playback
 acknowledgements without service credentials. Sarvam/DeepSeek live adapters are selected with
 `VOICE_MODE=live`; they require credentials. The sections below also retain the Slice 1 harness.
+
+`make smoke-live` explicitly makes actual Sarvam/DeepSeek requests using synthetic input and
+writes a speech WAV plus sanitized diagnostics under `reports/live-provider-smoke/`. It is
+opt-in, potentially billable, and separate from normal pytest/CI. It never calls Exotel.
 
 FastAPI modular monolith with SQLAlchemy 2, Alembic, Pydantic, pytest, and OpenTelemetry.
 The same `ConversationOrchestrator` is used by the CLI, HTTP API, replay, tests, and golden evals.

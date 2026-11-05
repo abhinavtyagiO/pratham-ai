@@ -1,3 +1,5 @@
+"""Read-only configuration preflight; no provider or Exotel requests are made."""
+
 import json
 import sys
 
@@ -6,6 +8,11 @@ from app.realtime.config import VoiceSettings
 
 
 def main():
+    """Read app/voice settings from the environment and current directory's .env and print
+    configuration presence only. Return 1 for missing required fields, otherwise 0; do not
+    unwrap/print secrets or perform network calls. A pass does not verify account balance,
+    provider authentication, enabled ingress, or real-phone acceptance.
+    """
     voice, app = VoiceSettings(), Settings()
     fields = {
         "VOICE_SARVAM_API_KEY": voice.sarvam_api_key,

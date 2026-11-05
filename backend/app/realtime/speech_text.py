@@ -1,3 +1,5 @@
+"""Reviewed native-Hindi equivalents of the same policy-authorized speech acts."""
+
 from app.domain.conversations import ModelContext, ResponseDraft
 from app.domain.types import Action
 
@@ -5,7 +7,12 @@ GREETING_HI = "नमस्ते, {name} के AI assistant से बात �
 
 
 def render_hindi(context: ModelContext, draft: ResponseDraft):
-    """The same authorized speech acts in native script for Sarvam's Hindi voice."""
+    """Render reviewed Hindi wording from authorized context and a validated draft.
+
+    Owner attention overrides phrasing, and the optional closing time comes only
+    from confirmed business facts. Script substitution changes period words only;
+    no model-written sentence or alternate numeric fact enters synthesized speech.
+    """
     if context.decision == Action.REQUIRE_OWNER_ATTENTION:
         return (
             "इसकी पक्की जानकारी अभी मेरे पास नहीं है। अपना नाम और सवाल की जानकारी बता दीजिए, "

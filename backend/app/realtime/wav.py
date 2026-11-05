@@ -1,12 +1,22 @@
+"""Incremental, strict RIFF/WAVE-to-PCM decoding for streaming speech output."""
+
 import struct
 
 from app.realtime.contracts import VoiceFailure
 
 
 class StreamingWAV:
-    """Strip a validated streaming RIFF/WAVE header; never forward headers as PCM samples."""
+    """Incrementally validate and strip Bulbul RIFF/WAVE framing into raw PCM16. Own fragmented
+    header bytes, fmt/data state, remaining declared payload size, and a one-byte sample
+    carry. One decoder belongs to one utterance; no headers or incomplete samples are
+    emitted as playable audio.
+    """
 
     def __init__(self, sample_rate):
+        """Set the required sample rate and initialize empty header/chunk/sample state.
+        Validation accepts only PCM codec 1, mono, 16-bit little-endian with two-byte block
+        alignment.
+        """
         self.sample_rate = sample_rate
         self.header = bytearray()
         self.riff = False
@@ -16,6 +26,11 @@ class StreamingWAV:
         self.carry = b""
 
     def feed(self, data: bytes) -> bytes:
+        """Consume a fragmented WAV byte stream and return only complete PCM samples. Validate
+        RIFF/fmt metadata, skip bounded ancillary chunks with RIFF padding, and support
+        unknown data length 0xffffffff. Retain partial header/sample bytes and reject
+        incompatible or oversized headers with sanitized TTS failure.
+        """
         if not self.in_data:
             self.header.extend(data)
             if not self.riff:
@@ -31,6 +46,8 @@ class StreamingWAV:
                     if not self.fmt:
                         raise VoiceFailure("TTS_ERROR", "wav_format_missing")
                     self.in_data = True
+                    # Streaming providers cannot always know total length up front.
+                    # Accept RIFF's unknown-length sentinel without relaxing PCM checks.
                     self.remaining = None if size == 0xFFFFFFFF else size
                     data = bytes(self.header[8:])
                     self.header.clear()
@@ -58,9 +75,15 @@ class StreamingWAV:
             data = data[: self.remaining]
             self.remaining -= len(data)
         data = self.carry + data
+        # Network boundaries may bisect a 16-bit sample. Hold its first byte until
+        # the next fragment so downstream buffers always receive aligned PCM16.
         self.carry = data[-1:] if len(data) % 2 else b""
         return data[:-1] if self.carry else data
 
     def finish(self):
+        """Require a parsed data chunk, complete final sample, and exhausted declared payload.
+        Raise wav_truncated for incomplete output; unknown-length streaming data is allowed
+        once its samples are aligned.
+        """
         if not self.in_data or self.carry or self.remaining not in (None, 0):
             raise VoiceFailure("TTS_ERROR", "wav_truncated")

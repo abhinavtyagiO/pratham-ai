@@ -1,3 +1,5 @@
+"""Legacy deterministic text simulation and single-turn snapshot replay command."""
+
 import argparse
 import json
 import sys
@@ -14,6 +16,11 @@ from app.services.orchestrator import ConversationOrchestrator
 
 
 def main():
+    """Run one legacy deterministic simulation or replay its first customer turn with saved
+    business/rule facts. Parse CLI inputs, use the configured database, print a result or
+    bounded failure, and return an exit code. Own/dispose engine and telemetry; replay does
+    not reproduce a complete live multi-turn audio session.
+    """
     parser = argparse.ArgumentParser(description="Run one deterministic simulated customer turn")
     parser.add_argument("utterance", nargs="?")
     parser.add_argument("--business-id", default=BUSINESS_ID)
