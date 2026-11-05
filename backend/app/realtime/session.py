@@ -18,6 +18,7 @@ from app.realtime.audio import EnergyVAD, PCMBuffer, PCMResampler
 from app.realtime.contracts import SpeechEvent, VoiceFailure
 from app.realtime.pipeline import AuthorizedPlayback, IncomingPCM, RecognizedSpeech, VoicePipeline
 from app.realtime.playback import Packet, Playback
+from app.realtime.speech_text import GREETING_HI, render_hindi
 from app.realtime.store import VoiceStore
 
 SILENCE_PROMPT = "क्या आप मुझे सुन पा रहे हैं? कृपया अपनी बात बताइए।"
@@ -112,12 +113,14 @@ class RealtimeSession:
         tick = monotonic()
         self.generation += 1
         active = self.response_task
+        was_generating = bool(active and not active.done())
         if active and not active.done():
             active.cancel()
             await asyncio.gather(active, return_exceptions=True)
         self.response_task = None
-        unplayed = [(g, value) for g, value in self.attempts.items() if value[1] != "PLAYED"]
-        if active or unplayed or self.playback.pending:
+        unplayed = [(g, value) for g, value in self.attempts.items() if value[1] == "GENERATED"]
+        interrupted = bool(was_generating or unplayed or self.playback.pending)
+        if interrupted:
             await self.playback.clear(self.generation)
             self.latency("audio_cleared", tick, reason=reason, generation=self.generation)
             for gen, (message_id, _) in unplayed:
@@ -125,7 +128,8 @@ class RealtimeSession:
                 self.attempts[gen] = (message_id, "INTERRUPTED")
         else:
             self.playback.generation = self.generation
-        self.latency("barge_in_cancelled", tick, generation=self.generation)
+        if interrupted:
+            self.latency("barge_in_cancelled", tick, generation=self.generation)
 
     async def speech(self, speech):
         now = monotonic()
@@ -159,7 +163,10 @@ class RealtimeSession:
                 raise VoiceFailure("STT_ERROR", "transcript_limit")
             if speech.utterance_id:
                 self.final_ids.add(speech.utterance_id)
-            self.latency("stt_final", self.awaiting_final or now)
+            if self.awaiting_final:
+                self.latency("stt_final", self.awaiting_final)
+            else:
+                self.log("stt_final", latency_ms=None)
             self.awaiting_final = None
             self.in_speech = False
             self.speech_since = None
@@ -175,6 +182,8 @@ class RealtimeSession:
 
     async def respond(self, turn, generation, utterance=None, fixed_text=None):
         self.response_started = monotonic()
+        stage = "load_business_context"
+        version = getattr(self.providers.model, "prompt_version", RESPONSE_VERSION)
         try:
             async with asyncio.timeout(self.settings.response_timeout_s):
                 if fixed_text is None:
@@ -183,6 +192,9 @@ class RealtimeSession:
                     with self.telemetry.stage("detect_intent", self.call_id, "intent_latency_ms"):
                         detected = DeterministicIntentDetector().detect(utterance)
                         self.log("intent_detected", intent=detected.intent, turn_index=turn)
+                        self.telemetry.count("intents_detected_total", intent=detected.intent)
+                        if detected.intent == "UNKNOWN":
+                            self.telemetry.count("unknown_intent_total")
                     with self.telemetry.stage("evaluate_policy", self.call_id, "policy_latency_ms"):
                         policy = PolicyEngine().evaluate(business.id, detected.intent, rules)
                         self.log(
@@ -191,14 +203,17 @@ class RealtimeSession:
                             rule_id=policy.rule_id,
                             turn_index=turn,
                         )
+                        if policy.rule_id:
+                            self.telemetry.count("rules_triggered_total", decision=policy.decision)
                     await self.store.decision(policy, turn)
                     with self.telemetry.stage("build_model_context", self.call_id):
                         context = build_model_context(business, policy)
                     tick = monotonic()
+                    stage = "generate_response"
                     output, error, tokens = None, None, {"input": None, "output": None}
                     self.log(
                         "model_request_started",
-                        prompt_version=RESPONSE_VERSION,
+                        prompt_version=version,
                         provider=self.providers.model.name,
                         model=self.providers.model.model,
                     )
@@ -213,14 +228,43 @@ class RealtimeSession:
                         output = draft.model_dump(mode="json")
                         tokens = {"input": result.input_tokens, "output": result.output_tokens}
                         self.latency("llm_first_usable_response", tick, turn_index=turn)
+                    except asyncio.CancelledError:
+                        await self.store.invocation(
+                            trace_id=self.trace_id,
+                            provider=self.providers.model.name,
+                            model=self.providers.model.model,
+                            prompt_version=version,
+                            input_context_identifiers={
+                                "business_id": business.id,
+                                "rule_id": policy.rule_id,
+                                "turn_index": turn,
+                            },
+                            output=None,
+                            latency_ms=round((monotonic() - tick) * 1000),
+                            token_usage=tokens,
+                            error="CancelledError",
+                            retry_count=0,
+                        )
+                        self.log(
+                            "model_request_cancelled",
+                            prompt_version=version,
+                            provider=self.providers.model.name,
+                            generation=generation,
+                        )
+                        raise
                     except (VoiceFailure, ValueError) as exc:
                         error = (
                             exc.error_type if isinstance(exc, VoiceFailure) else type(exc).__name__
                         )
                         self.attention = "MODEL_ERROR"
+                        self.telemetry.count(
+                            "model_failures_total", provider=self.providers.model.name
+                        )
                         self.log("model_request_failed", error_type=error)
                         await self.store.failure(
-                            self.trace_id, VoiceFailure("MODEL_ERROR", "generate_response", error)
+                            self.trace_id,
+                            VoiceFailure("MODEL_ERROR", "generate_response", error),
+                            provider=self.providers.model.name,
                         )
                         # One deterministic authorized fallback; unchecked output never reaches TTS.
                         draft = ResponseDraft()
@@ -229,7 +273,7 @@ class RealtimeSession:
                         trace_id=self.trace_id,
                         provider=self.providers.model.name,
                         model=self.providers.model.model,
-                        prompt_version=RESPONSE_VERSION,
+                        prompt_version=version,
                         input_context_identifiers={
                             "business_id": business.id,
                             "rule_id": policy.rule_id,
@@ -242,15 +286,18 @@ class RealtimeSession:
                         retry_count=0,
                     )
                     text = render_response(context, draft)
+                    if self.settings.mode == "live":
+                        text = render_hindi(context, draft)
                     self.log(
                         "model_request_completed",
-                        prompt_version=RESPONSE_VERSION,
+                        prompt_version=version,
                         output_sha256=hashlib.sha256(text.encode()).hexdigest(),
                         fallback=error is not None,
                     )
                 else:
                     text = fixed_text
                 message_id = await self.store.assistant(text, turn)
+                stage = "text_to_speech"
                 self.attempts[generation] = (message_id, "GENERATED")
                 tick = monotonic()
                 resampler = PCMResampler(16000, self.protocol.start.sample_rate)
@@ -297,8 +344,12 @@ class RealtimeSession:
                 exc
                 if isinstance(exc, VoiceFailure)
                 else VoiceFailure(
-                    "DATABASE_ERROR" if isinstance(exc, SQLAlchemyError) else "TTS_ERROR",
-                    "respond",
+                    "DATABASE_ERROR"
+                    if isinstance(exc, SQLAlchemyError)
+                    else "TTS_ERROR"
+                    if stage == "text_to_speech"
+                    else "CONTEXT_ERROR",
+                    stage,
                     type(exc).__name__,
                 )
             )
@@ -408,6 +459,9 @@ class RealtimeSession:
                     self.protocol.start,
                     self.trace_id,
                     self.settings.mode,
+                    response_version=getattr(
+                        self.providers.model, "prompt_version", RESPONSE_VERSION
+                    ),
                 )
                 started = True
                 await self.pipeline.start()
@@ -422,9 +476,18 @@ class RealtimeSession:
                     )
                 ]
                 self.response_task = asyncio.create_task(
-                    self.respond(0, 0, fixed_text=GREETING.format(name=business.name))
+                    self.respond(
+                        0,
+                        0,
+                        fixed_text=(
+                            GREETING_HI if self.settings.mode == "live" else GREETING
+                        ).format(name=business.name),
+                    )
                 )
                 await self.stopping.wait()
+            except asyncio.CancelledError:
+                self.fail(VoiceFailure("TELEPHONY_ERROR", "server_shutdown", "CancelledError"))
+                raise
             except Exception as exc:
                 self.fail(
                     exc
@@ -450,7 +513,30 @@ class RealtimeSession:
                     except Exception as exc:
                         self.log("provider_cleanup_failed", error_type=type(exc).__name__)
                 if hasattr(self.pipeline, "task"):
-                    await self.pipeline.close()
+                    try:
+                        await self.pipeline.close()
+                    except Exception as exc:
+                        self.fail(
+                            VoiceFailure("UNKNOWN_ERROR", "pipeline_cleanup", type(exc).__name__)
+                        )
+                if self.failure:
+                    root.set_status(Status(StatusCode.ERROR))
+                    self.telemetry.count(
+                        "stage_errors_total",
+                        stage=self.failure.stage,
+                        category=self.failure.category,
+                    )
+                    if self.failure.category == "DATABASE_ERROR":
+                        self.telemetry.count("database_errors_total")
+                    if not started:
+                        self.log(
+                            "stage_failed",
+                            category=self.failure.category,
+                            stage=self.failure.stage,
+                            error_type=self.failure.error_type,
+                        )
+                        self.log("call_failed", persisted=False)
+                        self.telemetry.count("calls_failed_total")
                 if started:
                     try:
                         if self.partial:
@@ -458,7 +544,15 @@ class RealtimeSession:
                             self.attention = self.attention or "PARTIAL_TRANSCRIPT"
                         if self.failure:
                             root.set_status(Status(StatusCode.ERROR))
-                            await self.store.failure(self.trace_id, self.failure)
+                            await self.store.failure(
+                                self.trace_id,
+                                self.failure,
+                                provider={
+                                    "STT_ERROR": self.providers.stt.name,
+                                    "TTS_ERROR": self.providers.tts.name,
+                                    "MODEL_ERROR": self.providers.model.name,
+                                }.get(self.failure.category),
+                            )
                             self.log(
                                 "stage_failed",
                                 category=self.failure.category,
@@ -468,6 +562,7 @@ class RealtimeSession:
                         self.outcome = await self.store.finish(
                             self.reason, self.attention, failed=self.failure is not None
                         )
+                        self.log("summary_generated", prompt_version="voice_call_summary:v1")
                         self.log(
                             "call_failed" if self.failure else "call_completed",
                             outcome=self.outcome,

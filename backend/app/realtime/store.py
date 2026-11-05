@@ -37,7 +37,9 @@ class VoiceStore:
                 await task
                 raise
 
-    async def start(self, business_id, info, trace_id, mode):
+    async def start(
+        self, business_id, info, trace_id, mode, response_version="response_generation:v1"
+    ):
         def start(db, repo):
             repo.start(self.call_id, business_id, info.caller_phone, trace_id, commit=False)
             business, rules = repo.load_context(business_id)
@@ -48,7 +50,7 @@ class VoiceStore:
                     rules,
                     {
                         "voice": "voice_runtime:v1",
-                        "response": "response_generation:v1",
+                        "response": response_version,
                     },
                 ),
                 commit=False,
@@ -149,7 +151,7 @@ class VoiceStore:
     async def invocation(self, **fields):
         await self.execute(lambda db, repo: repo.invocation(call_id=self.call_id, **fields))
 
-    async def failure(self, trace_id, failure):
+    async def failure(self, trace_id, failure, *, provider=None):
         def save(db, repo):
             db.add(
                 CallFailure(
@@ -157,9 +159,10 @@ class VoiceStore:
                     trace_id=trace_id,
                     stage=failure.stage,
                     category=failure.category,
-                    provider=None,
+                    provider=provider,
                     error_type=failure.error_type,
-                    retryable=False,
+                    retryable=failure.error_type
+                    in {"TimeoutError", "ConnectionError", "ConnectionClosedError"},
                 )
             )
 

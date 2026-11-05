@@ -8,6 +8,13 @@ class VoiceSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VOICE_", env_file=".env", extra="ignore")
     enabled: bool = False
     mode: Literal["mock", "live"] = "mock"
+    sarvam_api_key: SecretStr | None = None
+    deepseek_api_key: SecretStr | None = None
+    stt_model: str = "saaras:v4"
+    tts_model: str = "bulbul:v4-flash"
+    llm_model: str = "deepseek-flash"
+    language_code: str = "hi-IN"
+    tts_speaker: str = "shubh_hi_customer"
     business_id: str = "00000000-0000-0000-0000-000000000001"
     exotel_ws_user: str = "pratham"
     exotel_ws_password: SecretStr | None = None

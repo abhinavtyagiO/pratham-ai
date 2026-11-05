@@ -25,10 +25,11 @@ def test_data_endpoints_require_configured_bearer_key(engine, session, telemetry
         assert client.get("/metrics").status_code == 401
         assert client.post("/calls/simulate", json={}).status_code == 401
         assert client.get("/metrics", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    with TestClient(
-        create_app(Settings(api_key=None), engine=engine, telemetry=telemetry)
-    ) as client:
-        assert client.get("/metrics").status_code == 503
+    for key in (None, SecretStr("")):
+        with TestClient(
+            create_app(Settings(api_key=key), engine=engine, telemetry=telemetry)
+        ) as client:
+            assert client.get("/metrics", headers={"Authorization": "Bearer "}).status_code == 503
 
 
 def test_websocket_authentication_and_full_handshake(engine, session, telemetry):

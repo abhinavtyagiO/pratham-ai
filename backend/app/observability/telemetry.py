@@ -97,7 +97,7 @@ HISTOGRAMS = (
 
 class Telemetry:
     def __init__(self, otlp_endpoint: str | None = None, span_exporter=None):
-        resource = Resource.create({"service.name": "ai-business-pa", "service.version": "0.1.0"})
+        resource = Resource.create({"service.name": "ai-business-pa", "service.version": "0.2.0"})
         self.traces = TracerProvider(resource=resource, shutdown_on_exit=False)
         self.traces.add_span_processor(SimpleSpanProcessor(span_exporter or JSONSpanExporter()))
         self.reader = InMemoryMetricReader()

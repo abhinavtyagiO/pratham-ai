@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-business-pa"
-version = "0.1.0"
-description = "Policy-constrained business PA, first simulated vertical slice"
+version = "0.2.0"
+description = "Pratham AI: policy-constrained real-time business voice assistant"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",

@@ -41,14 +41,20 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         from app.realtime.config import VoiceSettings
-        from app.realtime.mock import mock_voice_providers
+        from app.realtime.factory import build_voice_providers, validate_live_settings
         from app.realtime.router import SessionRegistry
 
         app.state.settings = settings
         app.state.voice_settings = voice_settings or VoiceSettings()
-        if app.state.voice_settings.mode == "live" and voice_factory is None:
-            raise ValueError("Live voice provider factory is not configured")
-        app.state.voice_factory = voice_factory or mock_voice_providers
+        if (
+            app.state.voice_settings.enabled
+            and app.state.voice_settings.mode == "live"
+            and voice_factory is None
+        ):
+            validate_live_settings(app.state.voice_settings)
+        app.state.voice_factory = voice_factory or (
+            lambda: build_voice_providers(app.state.voice_settings)
+        )
         app.state.voice_registry = SessionRegistry(app.state.voice_settings.max_sessions)
         app.state.engine = engine if engine is not None else make_engine(settings.database_url)
         app.state.sessions = make_sessions(app.state.engine)

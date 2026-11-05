@@ -138,6 +138,7 @@ class AudioHarness:
             await self.feed(
                 "stop", stop={"call_sid": self.start["start"]["call_sid"], "reason": "callended"}
             )
-        await asyncio.wait_for(self.task, 8)
+        if not self.task.cancelled():
+            await asyncio.wait_for(self.task, 8)
         with self.sessions() as db:
             return CallRepository(db).detail(self.session.call_id)

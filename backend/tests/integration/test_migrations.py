@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -8,8 +9,9 @@ from alembic.config import Config
 from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
-from app.persistence.database import make_engine
+from app.persistence.database import make_engine, make_sessions
 from app.persistence.repository import CallRepository
+from app.realtime.harness import AudioHarness
 from app.seed import BUSINESS_ID, seed
 from app.services.orchestrator import ConversationOrchestrator
 
@@ -53,6 +55,19 @@ def test_postgres_migration_and_end_to_end_roundtrip(providers, telemetry):
                 assert detail["started_at"].tzinfo is not None
                 assert detail["outcome"]["outcome"] == "RESOLVED"
                 assert len(detail["model_invocations"]) == 2
+
+            async def voice_roundtrip():
+                sessions = make_sessions(
+                    engine.execution_options(schema_translate_map={None: schema})
+                )
+                harness = await AudioHarness(sessions, telemetry).begin()
+                await harness.utterance()
+                await harness.reply()
+                call = await harness.finish()
+                assert call["outcome"]["outcome"] == "RESOLVED"
+                assert call["voice_turns"][0]["status"] == "PLAYED"
+
+            asyncio.run(voice_roundtrip())
             command.downgrade(config, "base")
             assert inspect(connection).get_table_names() == ["alembic_version"]
         finally:
