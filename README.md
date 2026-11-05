@@ -1,5 +1,12 @@
 # AI Business PA
 
+Pratham AI includes Exotel PCM transport, Pipecat, multi-turn sessions, interruption/playback
+accounting, and policy-gated Sarvam/DeepSeek adapters. Start with the
+[engineering guide](docs/CODEBASE_GUIDE.md), [complete voice flow](docs/VOICE_DATA_FLOW.md), and
+[Slice 2 verification evidence](docs/SLICE_2_VERIFICATION_REPORT.md). A separate opt-in smoke
+utility checks actual providers; the deterministic `make simulate-audio` harness needs no keys.
+HTTP data routes require `API_KEY` and Bearer authentication. Historical Slice 1 reports remain.
+
 An owner-controlled personal assistant for incoming customer calls at an Indian tyre retailer.
 The owner rule is the authority: **owner rules → known business facts → constrained generation**.
 
@@ -42,7 +49,7 @@ make simulate
 ```
 
 The [backend guide](backend/README.md) explains PostgreSQL, API usage, diagnostics, and replay.
-No telephony, speech, or model API keys are required for this slice.
+No telephony, speech, or model API keys are required for deterministic simulations/evaluations.
 
 ## Review the logic
 
@@ -59,4 +66,5 @@ This slice uses deterministic mocks, a keyword intent classifier, and approved r
 templates. Its evaluation results establish local pipeline behavior; they do not measure live
 speech recognition, general LLM quality, or production call handling.
 
-Slice 2 and the mobile application have not been started.
+The live voice adapters have passed a synthetic provider smoke run. Real Exotel phone acceptance
+is still pending; no public deployment, forwarding configuration, or mobile application is included.

@@ -1,3 +1,5 @@
+"""Idempotent synthetic pilot seed data; existing business configuration is preserved."""
+
 from datetime import time
 
 from sqlalchemy.orm import Session
@@ -12,7 +14,11 @@ RULE_ID = "00000000-0000-0000-0000-000000000002"
 
 
 def seed(session: Session):
-    """Idempotent demo data; never overwrite an owner's existing configuration."""
+    """Idempotently insert the synthetic demo business and no-price-on-call owner rule when
+    absent. Never overwrite existing owner edits; commit the caller's Session and return the
+    demo business ID. Replace demo facts with owner-confirmed information before a real
+    pilot.
+    """
     if session.get(Business, BUSINESS_ID) is None:
         session.add(
             Business(
@@ -46,6 +52,10 @@ def seed(session: Session):
 
 
 def main():
+    """Load configured database settings, seed via a short Session, and dispose the CLI-owned
+    engine even on failure. This command changes local database contents but never contacts
+    speech/model providers.
+    """
     engine = make_engine(Settings().database_url)
     try:
         with make_sessions(engine)() as session:

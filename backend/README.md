@@ -1,4 +1,16 @@
-# Slice 1 backend
+# Pratham AI backend
+
+Start with the [engineering guide](../docs/CODEBASE_GUIDE.md),
+[complete voice data flow](../docs/VOICE_DATA_FLOW.md),
+[verification evidence](../docs/SLICE_2_VERIFICATION_REPORT.md), and
+[live voice test instructions](../docs/LIVE_VOICE_TEST.md). `make simulate-audio` runs real PCM
+through Exotel event parsing, Pipecat, scripted STT, policy/model gating, tone TTS, and playback
+acknowledgements without service credentials. Sarvam/DeepSeek live adapters are selected with
+`VOICE_MODE=live`; they require credentials. The sections below also retain the Slice 1 harness.
+
+`make smoke-live` explicitly makes actual Sarvam/DeepSeek requests using synthetic input and
+writes a speech WAV plus sanitized diagnostics under `reports/live-provider-smoke/`. It is
+opt-in, potentially billable, and separate from normal pytest/CI. It never calls Exotel.
 
 FastAPI modular monolith with SQLAlchemy 2, Alembic, Pydantic, pytest, and OpenTelemetry.
 The same `ConversationOrchestrator` is used by the CLI, HTTP API, replay, tests, and golden evals.
@@ -94,18 +106,21 @@ make serve
 
 ```sh
 curl -s http://127.0.0.1:8000/calls/simulate \
+  -H "Authorization: Bearer ${API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{"business_id":"00000000-0000-0000-0000-000000000001","utterance":"MRF ka rate kya hai?"}'
-curl -s http://127.0.0.1:8000/calls/<CALL_ID>
+curl -s -H "Authorization: Bearer ${API_KEY}" http://127.0.0.1:8000/calls/<CALL_ID>
 ```
 
 Unknown businesses and calls return 404; invalid input returns 422. Stage failures return 503
 with `call_id`, `trace_id`, `stage`, and `category`, without provider exception text.
 Failed calls remain retrievable when storage is available.
 
-The API is a local engineering harness without authentication or tenant authorization. Keep it
-on loopback with synthetic data. Authentication, retention, and deployment controls belong to
-a later pilot slice; this service has not been deployed.
+Set a nonempty `API_KEY` in the untracked `.env` and send `Authorization: Bearer <API_KEY>` to
+data routes. Unconfigured keys disable data access; missing/wrong credentials return 401.
+This is a single-business pilot administrator credential, not a multi-tenant identity system.
+Keep the local server on loopback; public TLS/WebSocket setup is described in the live-test guide.
+No deployment or real-phone test has been performed by this implementation.
 
 ## Policy and model boundary
 
@@ -208,5 +223,7 @@ command. No original audio is stored in slice 1.
 transport and deterministic phrasing choices. Mock TTS does not produce playable audio.
 `PROVIDER_MODE=mock` is the only implemented configuration; other values fail explicitly.
 
-Real Exotel, Sarvam, ElevenLabs, or LLM adapters and their credentials are deferred to the next
-slice. The mobile app, contacts, claims, inventory, transfers, and other intents are also deferred.
+The realtime path now has Exotel transport, Sarvam realtime STT/streaming TTS, and DeepSeek Flash
+adapters. `PROVIDER_MODE` still selects the original Slice 1 synchronous harness;
+`VOICE_MODE` separately selects the audio runtime. These paths do not exchange UTF-8 fake audio.
+The mobile app, contacts, claims, inventory, transfers, and other intents remain deferred.

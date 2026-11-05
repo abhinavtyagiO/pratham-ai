@@ -1,3 +1,5 @@
+"""Golden regression evaluations for deterministic intent, owner policy, and response safety."""
+
 import argparse
 import json
 import re
@@ -20,6 +22,11 @@ DEFAULT_DATASET = Path(__file__).resolve().parents[1] / "tests/evals/golden.json
 
 
 def assess(case, result):
+    """Check a rendered simulated result against one golden scenario. Detect forbidden
+    prices/numeric facts except the authorized seeded closing time, unsupported inventory
+    claims, expected intent/policy/outcome, and requested behaviors. Return per-check
+    evidence; unknown behavior names raise rather than silently passing.
+    """
     text = result.response
     # For this slice only the seeded closing time is an authorized numeric fact.
     without_time = text.replace("6:30", "")
@@ -52,6 +59,11 @@ def assess(case, result):
 
 
 def run_cases(session, providers, telemetry, cases):
+    """Run all golden cases in the supplied seeded Session with fresh orchestrators and
+    aggregate deterministic safety/accuracy metrics. Record only exception type for failed
+    cases, reject empty datasets, and return a JSON-compatible report. Uses the explicitly
+    supplied provider bundle, not live voice services.
+    """
     results = []
     repo = CallRepository(session)
     for case in cases:
@@ -91,6 +103,11 @@ def run_cases(session, providers, telemetry, cases):
 
 
 def main():
+    """Run golden evaluation in a migrated temporary SQLite database and write the requested
+    report. Own/dispose engine and telemetry, seed synthetic facts, and return nonzero
+    unless every scenario passes. No live voice adapter is selected by this legacy
+    evaluation command.
+    """
     parser = argparse.ArgumentParser(
         description="Golden conversation eval; isolated temporary database"
     )

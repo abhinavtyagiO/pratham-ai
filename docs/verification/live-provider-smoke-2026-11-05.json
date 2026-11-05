@@ -1,0 +1,56 @@
+{
+  "execution": "LIVE",
+  "created_at": "2026-11-05T16:38:29.161945+00:00",
+  "synthetic_data_only": true,
+  "exotel_requests_performed": false,
+  "real_phone_acceptance": "NOT_TESTED",
+  "checks": {
+    "tts": {
+      "model": "bulbul:v4-flash",
+      "network_request_attempted": true,
+      "status": "PASSED",
+      "diagnostics": {
+        "first_audio_ms": 1807.73,
+        "duration_s": 4.537,
+        "pcm_bytes": 145200,
+        "rms": 4120.6,
+        "audio": "reports/live-provider-smoke/synthetic-speech.wav"
+      },
+      "latency_ms": 2534.29
+    },
+    "llm": {
+      "model": "deepseek-flash",
+      "network_request_attempted": true,
+      "status": "PASSED",
+      "diagnostics": {
+        "thinking": "disabled",
+        "validated_draft": {
+          "phrasing": "POLITE",
+          "mention_closing_time": true
+        },
+        "input_tokens": 137,
+        "output_tokens": 15
+      },
+      "latency_ms": 2079.05
+    },
+    "stt": {
+      "model": "saaras:v4",
+      "network_request_attempted": true,
+      "status": "PASSED",
+      "diagnostics": {
+        "event_counts": {
+          "speech_start": 1,
+          "partial": 71,
+          "speech_end": 1,
+          "final": 1
+        },
+        "final_text_length": 57,
+        "final_text_sha256": "fd41296b30285ee75387d3674d8d851b1f02f2a3458f6b006b7cce994f5e1f40",
+        "input": "synthetic Bulbul-generated Hindi speech",
+        "endpointing": "vad"
+      },
+      "latency_ms": 6720.97
+    }
+  },
+  "passed": true
+}

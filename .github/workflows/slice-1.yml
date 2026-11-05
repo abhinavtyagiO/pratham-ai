@@ -1,4 +1,4 @@
-name: Slice 1 checks
+name: Pratham backend checks
 on: [push, pull_request]
 jobs:
   verify:
@@ -33,6 +33,7 @@ jobs:
         env:
           TEST_POSTGRES_URL: postgresql+psycopg://pa:pa_test@localhost:5432/pa_test
       - run: python -m app.evals --report reports/eval.json
+      - run: python -m app.simulate_audio
       - uses: actions/upload-artifact@v4
         with:
           name: slice-1-eval

@@ -1,14 +1,21 @@
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
+from app.config import Settings
 from app.main import create_app
 from app.seed import BUSINESS_ID
 
 
 def test_simulate_and_retrieve_through_http(engine, session, providers, telemetry):
-    api = create_app(engine=engine, providers=providers, telemetry=telemetry)
-    with TestClient(api) as client:
+    api = create_app(
+        Settings(api_key=SecretStr("test-key")),
+        engine=engine,
+        providers=providers,
+        telemetry=telemetry,
+    )
+    with TestClient(api, headers={"Authorization": "Bearer test-key"}) as client:
         assert client.get("/health").status_code == 200
         response = client.post(
             "/calls/simulate",
@@ -42,7 +49,10 @@ def test_simulate_and_retrieve_through_http(engine, session, providers, telemetr
 
 
 def test_invalid_requests_are_rejected(engine, session, telemetry):
-    with TestClient(create_app(engine=engine, telemetry=telemetry)) as client:
+    with TestClient(
+        create_app(Settings(api_key=SecretStr("test-key")), engine=engine, telemetry=telemetry),
+        headers={"Authorization": "Bearer test-key"},
+    ) as client:
         for fields in (
             {"utterance": " "},
             {"utterance": "x" * 4001},
@@ -72,7 +82,15 @@ def test_provider_failure_returns_correlated_error_and_retrievable_failure(
         raise TimeoutError("PRIVATE API KEY")
 
     monkeypatch.setattr(providers.model, "generate", fail)
-    with TestClient(create_app(engine=engine, providers=providers, telemetry=telemetry)) as client:
+    with TestClient(
+        create_app(
+            Settings(api_key=SecretStr("test-key")),
+            engine=engine,
+            providers=providers,
+            telemetry=telemetry,
+        ),
+        headers={"Authorization": "Bearer test-key"},
+    ) as client:
         response = client.post(
             "/calls/simulate",
             json={
