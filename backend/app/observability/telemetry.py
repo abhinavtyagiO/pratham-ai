@@ -91,6 +91,7 @@ HISTOGRAMS = (
     "llm_latency_ms",
     "tts_latency_ms",
     "end_to_end_turn_latency_ms",
+    "voice_stage_latency_ms",
 )
 
 

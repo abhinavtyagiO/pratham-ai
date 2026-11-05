@@ -1,5 +1,10 @@
 # AI Business PA
 
+Pratham AI now includes the [Slice 2A real-time checkpoint](docs/SLICE_2A_REPORT.md):
+Exotel PCM transport, Pipecat, multi-turn sessions, interruption/playback accounting, and a
+credential-free `make simulate-audio` harness. HTTP data endpoints now require a configured
+`API_KEY` and Bearer authentication. The historical Slice 1 report remains unchanged.
+
 An owner-controlled personal assistant for incoming customer calls at an Indian tyre retailer.
 The owner rule is the authority: **owner rules → known business facts → constrained generation**.
 

@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.api.security import require_api_key
 from app.config import Settings
 from app.observability.telemetry import Telemetry, configure_logging
 from app.persistence.database import make_engine, make_sessions
@@ -25,12 +26,30 @@ class SimulateRequest(BaseModel):
     caller_phone: str | None = Field(default=None, pattern=r"^\+?[0-9]{7,15}$")
 
 
-def create_app(settings=None, *, engine=None, providers=None, telemetry=None):
+def create_app(
+    settings=None,
+    *,
+    engine=None,
+    providers=None,
+    telemetry=None,
+    voice_settings=None,
+    voice_factory=None,
+):
     settings = settings or Settings()
     configure_logging(settings.log_level)
 
     @asynccontextmanager
     async def lifespan(app):
+        from app.realtime.config import VoiceSettings
+        from app.realtime.mock import mock_voice_providers
+        from app.realtime.router import SessionRegistry
+
+        app.state.settings = settings
+        app.state.voice_settings = voice_settings or VoiceSettings()
+        if app.state.voice_settings.mode == "live" and voice_factory is None:
+            raise ValueError("Live voice provider factory is not configured")
+        app.state.voice_factory = voice_factory or mock_voice_providers
+        app.state.voice_registry = SessionRegistry(app.state.voice_settings.max_sessions)
         app.state.engine = engine if engine is not None else make_engine(settings.database_url)
         app.state.sessions = make_sessions(app.state.engine)
         app.state.providers = (
@@ -47,7 +66,10 @@ def create_app(settings=None, *, engine=None, providers=None, telemetry=None):
             if engine is None:
                 app.state.engine.dispose()
 
-    api = FastAPI(title="AI Business PA — Slice 1", version="0.1.0", lifespan=lifespan)
+    api = FastAPI(title="Pratham AI", version="0.2.0", lifespan=lifespan)
+    from app.realtime.router import router as voice_router
+
+    api.include_router(voice_router)
 
     def session():
         with api.state.sessions() as db:
@@ -61,7 +83,7 @@ def create_app(settings=None, *, engine=None, providers=None, telemetry=None):
             raise HTTPException(503, "Database unavailable") from exc
         return {"status": "ok", "provider_mode": settings.provider_mode}
 
-    @api.post("/calls/simulate", status_code=201)
+    @api.post("/calls/simulate", status_code=201, dependencies=[Depends(require_api_key)])
     def simulate(request: SimulateRequest, db: Annotated[Session, Depends(session)]):
         try:
             result = ConversationOrchestrator(
@@ -83,14 +105,14 @@ def create_app(settings=None, *, engine=None, providers=None, telemetry=None):
             ) from exc
         return asdict(result)
 
-    @api.get("/calls/{call_id}")
+    @api.get("/calls/{call_id}", dependencies=[Depends(require_api_key)])
     def detail(call_id: UUID, db: Annotated[Session, Depends(session)]):
         call = CallRepository(db).detail(str(call_id))
         if call is None:
             raise HTTPException(404, "Call not found")
         return call
 
-    @api.get("/metrics")
+    @api.get("/metrics", dependencies=[Depends(require_api_key)])
     def metrics():
         return api.state.telemetry.metrics_snapshot()
 

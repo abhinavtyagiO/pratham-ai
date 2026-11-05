@@ -1,7 +1,17 @@
 from datetime import UTC, datetime, time
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, Time
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    Time,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -82,6 +92,10 @@ class ConversationMessage(Base):
     speaker: Mapped[str] = mapped_column(String(20))
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    delivery_status: Mapped[str] = mapped_column(
+        String(30), default="RECORDED", server_default="RECORDED"
+    )
+    turn_index: Mapped[int | None] = mapped_column(Integer)
 
 
 class CallOutcome(Base):
@@ -101,6 +115,7 @@ class PolicyDecision(Base):
     detected_intent: Mapped[str] = mapped_column(String(40))
     decision: Mapped[str] = mapped_column(String(50))
     decision_timestamp: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    turn_index: Mapped[int | None] = mapped_column(Integer)
 
 
 class ModelInvocation(Base):
@@ -130,3 +145,26 @@ class CallFailure(Base):
     error_type: Mapped[str] = mapped_column(String(100))
     retryable: Mapped[bool] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class VoiceSession(Base):
+    __tablename__ = "voice_sessions"
+    call_id: Mapped[str] = mapped_column(ForeignKey("calls.id"), primary_key=True)
+    provider_call_sid: Mapped[str] = mapped_column(String(128), unique=True)
+    stream_sid: Mapped[str] = mapped_column(String(128), unique=True)
+    sample_rate: Mapped[int] = mapped_column(Integer)
+    mode: Mapped[str] = mapped_column(String(20))
+    end_reason: Mapped[str | None] = mapped_column(String(40))
+
+
+class VoiceTurn(Base):
+    __tablename__ = "voice_turns"
+    __table_args__ = (UniqueConstraint("call_id", "turn_index"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    call_id: Mapped[str] = mapped_column(ForeignKey("calls.id"), index=True)
+    turn_index: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30))
+    outcome: Mapped[str | None] = mapped_column(String(30))
+    assistant_message_id: Mapped[str | None] = mapped_column(ForeignKey("conversation_messages.id"))
+    attention_reason: Mapped[str | None] = mapped_column(String(60))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

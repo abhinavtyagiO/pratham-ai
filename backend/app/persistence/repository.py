@@ -22,6 +22,8 @@ from app.persistence.models import (
     ConversationMessage,
     ModelInvocation,
     PolicyDecision,
+    VoiceSession,
+    VoiceTurn,
     utcnow,
 )
 from app.services.errors import BusinessNotFound
@@ -72,7 +74,7 @@ class CallRepository:
         ]
         return BusinessContext(**data), rules
 
-    def start(self, call_id, business_id, caller_phone, trace_id, replay_of=None):
+    def start(self, call_id, business_id, caller_phone, trace_id, replay_of=None, *, commit=True):
         if self.session.get(Business, business_id) is None:
             raise BusinessNotFound(business_id)
         self.session.add(
@@ -86,11 +88,13 @@ class CallRepository:
                 replay_of_call_id=replay_of,
             )
         )
-        self.session.commit()
+        if commit:
+            self.session.commit()
 
-    def save_snapshot(self, call_id, snapshot):
+    def save_snapshot(self, call_id, snapshot, *, commit=True):
         self.session.get(Call, call_id).configuration_snapshot = snapshot
-        self.session.commit()
+        if commit:
+            self.session.commit()
 
     def message(self, call_id, speaker, text):
         count = len(
@@ -123,7 +127,7 @@ class CallRepository:
         self.session.add(ModelInvocation(**fields))
         self.session.commit()
 
-    def complete(self, call_id, outcome, summary, attention_reason):
+    def complete(self, call_id, outcome, summary, attention_reason, *, commit=True):
         call = self.session.get(Call, call_id)
         call.status = CallStatus.COMPLETED
         call.ended_at = utcnow()
@@ -136,7 +140,8 @@ class CallRepository:
                 attention_reason=attention_reason,
             )
         )
-        self.session.commit()
+        if commit:
+            self.session.commit()
 
     def fail(self, call_id, trace_id, stage, category, provider, error_type, retryable):
         self.session.rollback()
@@ -178,6 +183,17 @@ class CallRepository:
         outcome = self.session.get(CallOutcome, call_id)
         return {
             **fields(call),
+            "voice_session": fields(voice)
+            if (voice := self.session.get(VoiceSession, call_id))
+            else None,
+            "voice_turns": [
+                fields(r)
+                for r in self.session.scalars(
+                    select(VoiceTurn)
+                    .where(VoiceTurn.call_id == call_id)
+                    .order_by(VoiceTurn.turn_index)
+                )
+            ],
             "outcome": fields(outcome) if outcome else None,
             "messages": [
                 fields(r)
